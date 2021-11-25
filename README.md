@@ -11,15 +11,16 @@
 * h5py==2.10.0
 * PyYAML==5.4
 
+Our code is based on the fastMRI, more details can be find at https://github.com/facebookresearch/fastMRI.
+
 **Train**
 ```bash
 cd experimental/SANet/
 sbatch job.sh
 ```
 
-Our code is based on the fastMRI, more details can be find at https://github.com/facebookresearch/fastMRI.
 Change other arguments that you can train your own model.
-
+The deatils parameter settings can be find in our arXiv paper.
 
 Citation
 
