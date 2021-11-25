@@ -127,12 +127,12 @@ class SRModule(MriModule):
         """ constrast stretching according to imageJ
         http://homepages.inf.ed.ac.uk/rbf/HIPR2/stretch.htm"""
         values = np.sort(img, axis=None)
-        nr_pixels = np.size(values)  # 像素数目
+        nr_pixels = np.size(values)  
         lim = int(np.round(saturated_pixel*nr_pixels))
         v_min = values[lim]
         v_max = values[-lim-1]
         img = (img - v_min)*(255.0)/(v_max - v_min)
-        img = np.minimum(255.0, np.maximum(0.0, img))  # 限制到0-255区间
+        img = np.minimum(255.0, np.maximum(0.0, img)) 
         return img
 
     def fftshift(self, x, dim=None):
@@ -190,8 +190,8 @@ class SRModule(MriModule):
         loss_k = 0.1*loss_T1+0.9*loss_T2
 
 
-        input_T1img = self.inverseFT(output_T1k)#不是image
-        input_T2 = self.inverseFT(output_T2k)#是mage
+        input_T1img = self.inverseFT(output_T1k)#
+        input_T2 = self.inverseFT(output_T2k)#
 
         output_T1img,output_T2 = self.forward2(input_T1img,input_T2)
         loss_T1img = F.l1_loss(output_T1img, target_img_T1)
