@@ -48,7 +48,7 @@ def build_args():
     # ------------------------
     # TRAINING ARGUMENTS
     # ------------------------
-    path_config = pathlib.Path.cwd() / "mriSR_dirs.yaml"
+    path_config = pathlib.Path.cwd() / "mri_manet_dirs.yaml"
     knee_path = fetch_dir("knee_path", path_config)
     logdir = fetch_dir("log_path", path_config) / "MANet" / "rec"
 
