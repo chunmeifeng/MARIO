@@ -17,7 +17,7 @@ import fastmri
 from fastmri import MriModule
 from fastmri.data import transforms
 from fastmri.data.subsample import create_mask_for_mask_type
-from fastmri.models.SANet import SANet
+from fastmri.models.MANet import MANet
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
@@ -29,16 +29,13 @@ class SRModule(MriModule):
 
     def __init__(
         self,
-        n_resgroups = 5,    #10
-        n_resblocks = 10,    #20
-        n_feats = 64,       #64
+        n_channels_in=1,
+        n_channels_out=2,
         lr=0.001,
-        mask_type="random",
-        center_fractions=[0.08],
-        accelerations=[4],
         lr_step_size=40,
         lr_gamma=0.1,
         weight_decay=0.0,
+        L=2,
         **kwargs,
     ):
         """
@@ -62,53 +59,147 @@ class SRModule(MriModule):
             weight_decay (float): Parameter for penalizing weights norm.
         """
         super().__init__(**kwargs)
-        self.n_resgroups = n_resgroups
-        self.n_resblocks = n_resblocks
-        self.n_feats = n_feats
-        self.mask_type = mask_type
-        self.center_fractions = center_fractions
-        self.accelerations = accelerations
+        self.n_channels_in = n_channels_in
+        self.n_channels_out = n_channels_out
         self.lr = lr
         self.lr_step_size = lr_step_size
         self.lr_gamma = lr_gamma
         self.weight_decay = weight_decay
-        
+        # self.unet = UNet
+        self.UNet_k = Dense_Unet_k(
+            in_chan=2,
+            out_chan=2,
+            filters=64, 
+            num_conv = 4,)
+        self.UNet_img = Dense_Unet_img(
+            in_chan=1,
+            out_chan=1,
+            filters=64, 
+            num_conv = 4,)
 
-        self.sanet = SANet(n_resgroups = self.n_resgroups,   
-            n_resblocks = self.n_resblocks,    
-            n_feats = self.n_feats,        
-        )
-
-    def forward(self, targetpd,image):
-        pd, pdfs = self.sanet(targetpd.unsqueeze(1), image.unsqueeze(1))
-        pd = pd.squeeze(1)
-        pdfs = pdfs.squeeze(1)
-        return pd, pdfs
+    def forward(self, target_Kspace_T1,masked_Kspaces_T2):
+        return self.UNet_k(target_Kspace_T1,masked_Kspaces_T2)
+    def forward2(self, input_T1_img,input_T2_img):
+        return self.UNet_img(input_T1_img,input_T2_img)
 
     def training_step(self, batch, batch_idx):
-        image, target, mean, std, fname, slice_num = batch[1]#pdfs
-        imagepd, targetpd, meanpd, stdpd, fnamepd, slice_numpd = batch[0]#pd
-        pd, pdfs = self(targetpd,image)
-        loss_pd = F.l1_loss(pd, targetpd)
-        loss_pdfs = F.l1_loss(pdfs, target)
-        loss = 0.3*loss_pdfs+0.7*loss_pd
+        #T1
+        masked_Kspace_T1 = batch['masked_Kspaces_T1'].cuda().float()  
+        target_Kspace_T1 = batch['target_Kspace_T1'].cuda().float()
+        target_img_T1 = batch['target_img_T1'].cuda().float()
+        maskedNot = batch['maskedNot'].cuda().float()
+        #T2
+        masked_Kspaces_T2 = batch['masked_Kspaces_T2'].cuda().float() 
+        target_Kspace_T2 = batch['target_Kspace_T2'].cuda().float()
+        target_img_T2 = batch['target_img_T2'].cuda().float()
+        fname = batch['fname']
+        slice_num = batch['slice_num']
+
+        masked_img_T2 = self.inverseFT(masked_Kspaces_T2).cuda().float()
+       
+        output_T1k,output_T2k = self.forward(target_Kspace_T1,masked_Kspaces_T2)
+        loss_T1 = F.l1_loss(output_T1k, target_Kspace_T1)
+        loss_T2 = F.l1_loss(output_T2k, target_Kspace_T2)
+        loss_k = 0.1*loss_T1+0.9*loss_T2
+
+        input_T1_img = self.inverseFT(output_T1k)
+        input_T2 = self.inverseFT(output_T2k)
+
+        output_T1img,output_T2 = self.forward2(input_T1_img,input_T2)
+        loss_T1img = F.l1_loss(output_T1img, target_img_T1)
+        loss_T2img = F.l1_loss(output_T2, target_img_T2)
+        loss_img = 0.1*loss_T1img+0.9*loss_T2img
+
+        loss = loss_k + loss_img
 
         logs = {"loss": loss.detach()}
 
         return dict(loss=loss, log=logs)
 
+    def inverseFT(self, Kspace):
+        Kspace = Kspace.permute(0, 2, 3, 1)#last dimension=2
+        img_cmplx = torch.ifft(Kspace, 2)
+        img = torch.sqrt(img_cmplx[:, :, :, 0]**2 + img_cmplx[:, :, :, 1]**2)
+        img = img[:, None, :, :]
+        return img
+
+    def contrastStretching(self,img, saturated_pixel=0.004):
+        """ constrast stretching according to imageJ
+        http://homepages.inf.ed.ac.uk/rbf/HIPR2/stretch.htm"""
+        values = np.sort(img, axis=None)
+        nr_pixels = np.size(values)  # 像素数目
+        lim = int(np.round(saturated_pixel*nr_pixels))
+        v_min = values[lim]
+        v_max = values[-lim-1]
+        img = (img - v_min)*(255.0)/(v_max - v_min)
+        img = np.minimum(255.0, np.maximum(0.0, img))  # 限制到0-255区间
+        return img
+
+    def fftshift(self, x, dim=None):
+
+        if dim is None:
+            dim = tuple(range(x.dim()))
+            shift = [dim // 2 for dim in x.shape]
+        elif isinstance(dim, int):
+            shift = x.shape[dim] // 2
+        else:
+            shift = [x.shape[i] // 2 for i in dim]
+
+        return roll(x, shift, dim)
+
+    def imshow(self, img, title=""):
+        """ Show image as grayscale. """
+        if img.dtype == np.complex64 or img.dtype == np.complex128:
+            print('img is complex! Take absolute value.')
+            img = np.abs(img)
+
+        plt.figure()
+        plt.imshow(img, cmap='gray', interpolation='nearest')
+        plt.axis('off')
+        plt.title(title)
+        plt.show()
+
+
+    def ifft2(self, kspace_cplx):
+        return np.absolute(np.fft.ifft2(kspace_cplx))[None, :, :]
+
+    def fft2(self, img):
+        return np.fft.fftshift(np.fft.fft2(img))
+
     def validation_step(self, batch, batch_idx):
-        image, target, mean, std, fname, slice_num = batch[1]#pdfs
-        imagepd, targetpd, meanpd, stdpd, fnamepd, slice_numpd = batch[0]#pd
+        #T1
+        masked_Kspace_T1 = batch['masked_Kspaces_T1'].cuda().float()  
+        target_Kspace_T1 = batch['target_Kspace_T1'].cuda().float()
+        target_img_T1 = batch['target_img_T1'].cuda().float()
+        maskedNot = batch['maskedNot'].cuda().float()
+        masks = batch['masks'].cuda().float()
 
-        pd, pdfs = self(targetpd,image)
+        #T2
+        masked_Kspaces_T2 = batch['masked_Kspaces_T2'].cuda().float() 
+        target_Kspace_T2 = batch['target_Kspace_T2'].cuda().float()
+        target_img_T2 = batch['target_img_T2'].cuda().float()
+        fname = batch['fname']
+        slice_num = batch['slice_num']
 
-        mean = mean.unsqueeze(1).unsqueeze(2)
-        std = std.unsqueeze(1).unsqueeze(2)
-        output = pdfs
+        masked_img_T2 = self.inverseFT(masked_Kspaces_T2).cuda().float()    
 
-        # hash strings to int so pytorch can concat them
-        fnumber = torch.zeros(len(fname), dtype=torch.long, device=output.device)
+        output_T1k,output_T2k = self.forward(target_Kspace_T1,masked_Kspaces_T2)
+
+        loss_T1 = F.l1_loss(output_T1k, target_Kspace_T1)
+        loss_T2 = F.l1_loss(output_T2k, target_Kspace_T2)
+        loss_k = 0.1*loss_T1+0.9*loss_T2
+
+
+        input_T1img = self.inverseFT(output_T1k)#不是image
+        input_T2 = self.inverseFT(output_T2k)#是mage
+
+        output_T1img,output_T2 = self.forward2(input_T1img,input_T2)
+        loss_T1img = F.l1_loss(output_T1img, target_img_T1)
+        loss_T2img = F.l1_loss(output_T2, target_img_T2)
+        loss_img = 0.1*loss_T1img+0.9*loss_T2img
+        loss = loss_k + loss_img
+
+        fnumber = torch.zeros(len(fname), dtype=torch.long, device=output_T2.device)
         for i, fn in enumerate(fname):
             fnumber[i] = (
                 int(hashlib.sha256(fn.encode("utf-8")).hexdigest(), 16) % 10 ** 12
@@ -117,34 +208,42 @@ class SRModule(MriModule):
         return {
             "fname": fnumber,
             "slice": slice_num,
-            "output": output * std + mean,
-            "target": target * std + mean,
-            "input": image * std + mean,
-            "val_loss": F.l1_loss(output, target),
+            # "output": output * std + mean,
+            # "target": target * std + mean,
+            "output_T2": output_T2,
+            "target_im_T2": target_img_T2,
+            "val_loss": loss,
         }
 
     def test_step(self, batch, batch_idx):
-        image, _, mean, std, fname, slice_num = batch
-        output = self.forward(image)
-        mean = mean.unsqueeze(1).unsqueeze(2)
-        std = std.unsqueeze(1).unsqueeze(2)
+        #T1
+        masked_Kspace_T1 = batch['masked_Kspaces_T1'].cuda().float()#masked_kspace: torch.Size([1, 2, 256, 256])  
+        target_Kspace_T1 = batch['target_Kspace_T1'].cuda().float()# target_kspace: torch.Size([1, 2, 256, 256])
+        target_img_T1 = batch['target_img_T1'].cuda().float()#target_img: torch.Size([1, 1, 256, 256])
+        #T2
+        masked_Kspaces_T2 = batch['masked_Kspaces_T2'].cuda().float()#masked_kspace: torch.Size([1, 2, 256, 256])  
+        target_Kspace_T2 = batch['target_Kspace_T2'].cuda().float()# target_kspace: torch.Size([1, 2, 256, 256])
+        target_img_T2 = batch['target_img_T2'].cuda().float()#target_img: torch.Size([1, 1, 256, 256])
+
+        masked_img_T2 = self.inverseFT(masked_Kspaces_T2).cuda().float()
+        output_T1, output_T2 = self(target_img_T1,masked_img_T2)
+
+        fname = batch['fname']
+        slice_num = batch['slice_num']
+        fnumber = torch.zeros(len(fname), dtype=torch.long, device=output_T2.device)
+        for i, fn in enumerate(fname):
+            fnumber[i] = (
+                int(hashlib.sha256(fn.encode("utf-8")).hexdigest(), 16) % 10 ** 12
+            )
 
         return {
-            "fname": fname,
+            "fname": fnumber,
             "slice": slice_num,
-            "output": (output * std + mean).cpu().numpy(),
+            "output_T2": output_T2,
+            "target_im_T2": target_img_T2,
+            "test_loss": F.l1_loss(output_T2, target_img_T2),
         }
-    def contrastStretching(self,img, saturated_pixel=0.004):
-        """ constrast stretching according to imageJ
-        http://homepages.inf.ed.ac.uk/rbf/HIPR2/stretch.htm"""
-        values = np.sort(img, axis=None)
-        nr_pixels = np.size(values)  
-        lim = int(np.round(saturated_pixel*nr_pixels))
-        v_min = values[lim]
-        v_max = values[-lim-1]
-        img = (img - v_min)*(255.0)/(v_max - v_min)
-        img = np.minimum(255.0, np.maximum(0.0, img))  
-        return img
+
     def configure_optimizers(self):
         optim = torch.optim.RMSprop(
             self.parameters(), lr=self.lr, weight_decay=self.weight_decay,
@@ -155,21 +254,6 @@ class SRModule(MriModule):
 
         return [optim], [scheduler]
 
-    def train_data_transform(self):
-        mask = create_mask_for_mask_type(
-            self.mask_type, self.center_fractions, self.accelerations,
-        )
-
-        return DataTransform(self.challenge, mask, use_seed=False)
-
-    def val_data_transform(self):
-        mask = create_mask_for_mask_type(
-            self.mask_type, self.center_fractions, self.accelerations,
-        )
-        return DataTransform(self.challenge, mask)
-
-    def test_data_transform(self):
-        return DataTransform(self.challenge)
 
     @staticmethod
     def add_model_specific_args(parent_parser):  # pragma: no-cover
@@ -189,104 +273,14 @@ class SRModule(MriModule):
         parser.add_argument("--drop_prob", default=0.0, type=float)
 
         # data params
-        parser.add_argument(
-            "--mask_type", choices=["random", "equispaced"], default="random", type=str
-        )
-        parser.add_argument("--center_fractions", nargs="+", default=[0.08], type=float)
-        parser.add_argument("--accelerations", nargs="+", default=[4], type=int)
-
+        
         # training params (opt)
         parser.add_argument("--lr", default=0.001, type=float)
         parser.add_argument("--lr_step_size", default=40, type=int)
         parser.add_argument("--lr_gamma", default=0.1, type=float)
         parser.add_argument("--weight_decay", default=0.0, type=float)
 
+        parser.add_argument('--ixi-args', type=dict)
+
         return parser
 
-
-class DataTransform(object):
-    """
-    Data Transformer for training U-Net models.
-    """
-
-    def __init__(self, which_challenge, mask_func=None, use_seed=True):
-        """
-        Args:
-            which_challenge (str): Either "singlecoil" or "multicoil" denoting
-                the dataset.
-            mask_func (fastmri.data.subsample.MaskFunc): A function that can
-                create a mask of appropriate shape.
-            use_seed (bool): If true, this class computes a pseudo random
-                number generator seed from the filename. This ensures that the
-                same mask is used for all the slices of a given volume every
-                time.
-        """
-        if which_challenge not in ("singlecoil", "multicoil"):
-            raise ValueError(f'Challenge should either be "singlecoil" or "multicoil"')
-
-        self.mask_func = mask_func
-        self.which_challenge = which_challenge
-        self.use_seed = use_seed
-
-    def __call__(self, kspace, mask, target, attrs, fname, slice_num):
-        """
-        Args:
-            kspace (numpy.array): Input k-space of shape (num_coils, rows,
-                cols, 2) for multi-coil data or (rows, cols, 2) for single coil
-                data.
-            mask (numpy.array): Mask from the test dataset.
-            target (numpy.array): Target image.
-            attrs (dict): Acquisition related information stored in the HDF5
-                object.
-            fname (str): File name.
-            slice_num (int): Serial number of the slice.
-
-        Returns:
-            (tuple): tuple containing:
-                image (torch.Tensor): Zero-filled input image.
-                target (torch.Tensor): Target image converted to a torch
-                    Tensor.
-                mean (float): Mean value used for normalization.
-                std (float): Standard deviation value used for normalization.
-                fname (str): File name.
-                slice_num (int): Serial number of the slice.
-        """
-        kspace = transforms.to_tensor(kspace)
-
-
-        image = fastmri.ifft2c(kspace)
-
-        # crop input to correct size
-        if target is not None:
-            crop_size = (target.shape[-2], target.shape[-1])
-        else:
-            crop_size = (attrs["recon_size"][0], attrs["recon_size"][1])
-
-        # check for sFLAIR 203
-        if image.shape[-2] < crop_size[1]:
-            crop_size = (image.shape[-2], image.shape[-2])
-   
-        image = transforms.complex_center_crop(image, crop_size)
-
-        #getLR
-        imgfft = fastmri.fft2c(image)
-        imgfft = transforms.complex_center_crop(imgfft,(160,160))
-        LR_image = fastmri.ifft2c(imgfft)
-
-        # absolute value
-        LR_image = fastmri.complex_abs(LR_image)
-
-        # normalize input
-        LR_image, mean, std = transforms.normalize_instance(LR_image, eps=1e-11)
-        LR_image = LR_image.clamp(-6, 6)
-
-        # normalize target
-        if target is not None:
-            target = transforms.to_tensor(target)
-            target = transforms.center_crop(target, crop_size)
-            target = transforms.normalize(target, mean, std, eps=1e-11)
-            target = target.clamp(-6, 6)
-        else:
-            target = torch.Tensor([0])
-
-        return LR_image, target, mean, std, fname, slice_num
