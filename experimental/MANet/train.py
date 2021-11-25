@@ -50,7 +50,7 @@ def build_args():
     # ------------------------
     path_config = pathlib.Path.cwd() / "mriSR_dirs.yaml"
     knee_path = fetch_dir("knee_path", path_config)
-    logdir = fetch_dir("log_path", path_config) / "sanet" / "2x_SR"
+    logdir = fetch_dir("log_path", path_config) / "MANet" / "rec"
 
 
     parent_parser = ArgumentParser(add_help=False)
@@ -64,29 +64,18 @@ def build_args():
 
     # module config
     config = dict(
-        in_chans=1,
-        out_chans=1,
-        chans=32,
-        num_pool_layers=4,
-        drop_prob=0.0,
-        mask_type="random",
-        center_fractions=[0.08],
-        accelerations=[4],
         n_channels_in=1,
         n_channels_out=1,
-        n_resgroups = 6,    
-        n_resblocks = 6,    
-        n_feats = 64, 
-        lr=0.00001,     
+        lr=0.001,
         lr_step_size=40,
         lr_gamma=0.1,
         weight_decay=0.0,
-        data_path=knee_path,
-        challenge="singlecoil",
+        data_path=data_path,
         exp_dir=logdir,
         exp_name="unet_demo",
         test_split="test",
         batch_size=batch_size,
+        ixi_args=ixi_args,
     )
     parser.set_defaults(**config)
 
