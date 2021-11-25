@@ -15,7 +15,7 @@ Our code is based on the fastMRI, more details can be find at https://github.com
 
 **Train**
 ```bash
-cd experimental/SANet/
+cd experimental/MANet/
 sbatch job.sh
 ```
 
