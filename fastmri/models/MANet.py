@@ -1,383 +1,552 @@
-from fastmri.models import common
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import cv2
-import matplotlib.pyplot as plt
-import numpy as np
-import os
-
-def make_model(args, parent=False):
-    return SR_Branch(args)
-
-## Channel Attention (CA) Layer
-class CALayer(nn.Module):
-    def __init__(self, channel, reduction=16):
-        super(CALayer, self).__init__()
-        # global average pooling: feature --> point
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        # feature channel downscale and upscale --> channel weight
-        self.conv_du = nn.Sequential(
-                nn.Conv2d(channel, channel // reduction, 1, padding=0, bias=True),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(channel // reduction, channel, 1, padding=0, bias=True),
-                nn.Sigmoid()
-        )
-
-    def forward(self, x):
-        y = self.avg_pool(x)
-        y = self.conv_du(y)
-        return x * y 
-
-class LAM_Module(nn.Module):
-    """ Layer attention module"""
-    def __init__(self, in_dim):
-        super(LAM_Module, self).__init__()
-        self.chanel_in = in_dim
 
 
-        self.gamma = nn.Parameter(torch.zeros(1))
-        self.softmax  = nn.Softmax(dim=-1)
+class Single_level_densenet(nn.Module):
+    def __init__(self,filters, num_conv = 4):
+        super(Single_level_densenet, self).__init__()
+        self.num_conv = num_conv
+        self.conv_list = nn.ModuleList()
+        self.bn_list = nn.ModuleList()
+        for i in range(self.num_conv):
+            self.conv_list.append(nn.Conv2d(filters,filters,3, padding = 1))
+            self.bn_list.append(nn.BatchNorm2d(filters))
+            
     def forward(self,x):
-        """
-            inputs :
-                x : input feature maps( B X N X C X H X W)
-            returns :
-                out : attention value + input feature
-                attention: B X N X N
-        """
-        m_batchsize, N, C, height, width = x.size()
-        proj_query = x.view(m_batchsize, N, -1)
-        proj_key = x.view(m_batchsize, N, -1).permute(0, 2, 1)
-        energy = torch.bmm(proj_query, proj_key)
-        energy_new = torch.max(energy, -1, keepdim=True)[0].expand_as(energy)-energy
-        attention = self.softmax(energy_new)
-        proj_value = x.view(m_batchsize, N, -1)
+        outs = []
+        outs.append(x)
+        for i in range(self.num_conv):
+            temp_out = self.conv_list[i](outs[i])
+            if i > 0:
+                for j in range(i):
+                    temp_out += outs[j]
+            outs.append(F.relu(self.bn_list[i](temp_out)))
+        out_final = outs[-1]
+        del outs
+        return out_final
+    
+class Down_sample(nn.Module):
+    def __init__(self,kernel_size = 2, stride = 2):
+        super(Down_sample, self).__init__()
+        self.down_sample_layer = nn.MaxPool2d(kernel_size, stride)
+    
+    def forward(self,x):
+        y = self.down_sample_layer(x)
+        return y,x
 
-        out = torch.bmm(attention, proj_value)
-        out = out.view(m_batchsize, N, C, height, width)
+class Upsample_n_Concat_1(nn.Module):
+    def __init__(self,filters):
+        super(Upsample_n_Concat_1, self).__init__()
+        self.upsample_layer = nn.ConvTranspose2d(filters, filters, 4, padding = 1, stride = 2)
+        self.conv = nn.Conv2d(128,filters,3, padding = 1)
+        self.bn = nn.BatchNorm2d(filters)
+    
+    def forward(self,x,y):
+        x = self.upsample_layer(x)
+        x = torch.cat([x,y],dim = 1)
+        x = F.relu(self.bn(self.conv(x)))
+        return x
 
-        out = self.gamma*out + x
-        out = out.view(m_batchsize, -1, height, width)
-        return out
+class Upsample_n_Concat_2(nn.Module):
+    def __init__(self,filters):
+        super(Upsample_n_Concat_2, self).__init__()
+        self.upsample_layer = nn.ConvTranspose2d(64, filters, 4, padding = 1, stride = 2)
+        self.conv = nn.Conv2d(128,filters,3, padding = 1)
+        self.bn = nn.BatchNorm2d(filters)
+    
+    def forward(self,x,y):
+        x = self.upsample_layer(x)
+        x = torch.cat([x,y],dim = 1)
+        x = F.relu(self.bn(self.conv(x)))
+        return x
 
-class CSAM_Module(nn.Module):
-    """ Channel-Spatial attention module"""
-    def __init__(self, in_dim):
-        super(CSAM_Module, self).__init__()
-        self.chanel_in = in_dim
+class Upsample_n_Concat_3(nn.Module):
+    def __init__(self,filters):
+        super(Upsample_n_Concat_3, self).__init__()
+        self.upsample_layer = nn.ConvTranspose2d(64, filters, 4, padding = 1, stride = 2)
+        self.conv = nn.Conv2d(128,filters,3, padding = 1)
+        self.bn = nn.BatchNorm2d(filters)
+    
+    def forward(self,x,y):
+        x = self.upsample_layer(x)
+        x = torch.cat([x,y],dim = 1)
+        x = F.relu(self.bn(self.conv(x)))
+        return x
 
+class Upsample_n_Concat_4(nn.Module):
+    def __init__(self,filters):
+        super(Upsample_n_Concat_4, self).__init__()
+        self.upsample_layer = nn.ConvTranspose2d(64, filters, 4, padding = 1, stride = 2)
+        self.conv = nn.Conv2d(128,filters,3, padding = 1)
+        self.bn = nn.BatchNorm2d(filters)
+    
+    def forward(self,x,y):
+        x = self.upsample_layer(x)
+        x = torch.cat([x,y],dim = 1)
+        x = F.relu(self.bn(self.conv(x)))
+        return x
 
-        self.conv = nn.Conv3d(1, 1, 3, 1, 1)
-        self.gamma = nn.Parameter(torch.zeros(1))
-        #self.softmax  = nn.Softmax(dim=-1)
+class Upsample_n_Concat_T1(nn.Module):
+    def __init__(self,filters):
+        super(Upsample_n_Concat_T1, self).__init__()
+        self.upsample_layer = nn.ConvTranspose2d(filters, filters, 4, padding = 1, stride = 2)
+        self.conv = nn.Conv2d(filters,filters,3, padding = 1)
+        self.bn = nn.BatchNorm2d(filters)
+    
+    def forward(self,x):
+        x = self.upsample_layer(x)
+        x = F.relu(self.bn(self.conv(x)))
+        return x
+class ChannelAttention(nn.Module):
+    def __init__(self, in_planes, ratio=16):
+        super(ChannelAttention, self).__init__()
+        
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+
+        self.fc1   = nn.Conv2d(in_planes, in_planes // 16, 1, bias=False)
+        self.relu1 = nn.ReLU()
+        self.fc2   = nn.Conv2d(in_planes // 16, in_planes, 1, bias=False)
+
         self.sigmoid = nn.Sigmoid()
+    def forward(self, x):
+        max_out = self.fc2(self.relu1(self.fc1(self.max_pool(x))))
+        out = max_out
+        return self.sigmoid(out)
+
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size=7):
+        super(SpatialAttention, self).__init__()
+
+        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        padding = 3 if kernel_size == 7 else 1
+
+        self.conv1 = nn.Conv2d(1, 1, kernel_size, padding=padding, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        x=max_out
+        x = self.conv1(x)
+        return self.sigmoid(x)    
+
+class Dense_Unet_k(nn.Module):
+    def __init__(self, in_chan, out_chan, filters, num_conv = 4):  #64   256
+        super(Dense_Unet_k, self).__init__()
+        self.conv1T1 = nn.Conv2d(in_chan,filters,1)
+        self.conv1T2 = nn.Conv2d(4,filters,1)
+        self.convdemD0 = nn.Conv2d(64,64,kernel_size=3,padding=1)
+        self.convdemD1 = nn.Conv2d(64,64,kernel_size=3,padding=1)
+        self.convdemD2 = nn.Conv2d(64,64,kernel_size=3,padding=1)
+        self.convdemD3 = nn.Conv2d(64,64,kernel_size=3,padding=1)
+        self.convdemU0 = nn.Conv2d(64,64,kernel_size=3,padding=1)
+        self.convdemU1 = nn.Conv2d(64,64,kernel_size=3,padding=1)
+        self.convdemU2 = nn.Conv2d(64,64,kernel_size=3,padding=1)
+        self.convdemU3 = nn.Conv2d(64,64,kernel_size=3,padding=1)
+        
+
+        self.dT1_1 = Single_level_densenet(filters,num_conv )
+        self.downT1_1 = Down_sample()
+        self.dT1_2 = Single_level_densenet(filters,num_conv )
+        self.downT1_2 = Down_sample()
+        self.dT1_3 = Single_level_densenet(filters,num_conv )
+        self.downT1_3 = Down_sample()
+        self.dT1_4 = Single_level_densenet(filters,num_conv )
+        self.downT1_4 = Down_sample()
+
+        self.dT2_1 = Single_level_densenet(filters,num_conv )
+        self.downT2_1 = Down_sample()
+        self.dT2_2 = Single_level_densenet(filters,num_conv )
+        self.downT2_2 = Down_sample()
+        self.dT2_3 = Single_level_densenet(filters,num_conv )
+        self.downT2_3 = Down_sample()
+        self.dT2_4 = Single_level_densenet(filters,num_conv )
+        self.downT2_4 = Down_sample()
+
+        self.bottom_T1 = Single_level_densenet(filters,num_conv )
+        self.bottom_T2 = Single_level_densenet(filters,num_conv )
+
+        self.up4_T1 = Upsample_n_Concat_T1(filters)
+        self.u4_T1 = Single_level_densenet(filters,num_conv )
+        self.up3_T1 = Upsample_n_Concat_T1(filters)
+        self.u3_T1 = Single_level_densenet(filters,num_conv )
+        self.up2_T1 = Upsample_n_Concat_T1(filters)
+        self.u2_T1 = Single_level_densenet(filters,num_conv )
+        self.up1_T1 = Upsample_n_Concat_T1(filters)
+        self.u1_T1 = Single_level_densenet(filters,num_conv )
+
+        self.up4_T2 = Upsample_n_Concat_1(filters)
+        self.u4_T2 = Single_level_densenet(filters,num_conv )
+        self.up3_T2 = Upsample_n_Concat_2(filters)
+        self.u3_T2 = Single_level_densenet(filters,num_conv )
+        self.up2_T2 = Upsample_n_Concat_3(filters)
+        self.u2_T2 = Single_level_densenet(filters,num_conv )
+        self.up1_T2 = Upsample_n_Concat_4(filters)
+        self.u1_T2 = Single_level_densenet(filters,num_conv )
+
+        self.outconvT1 = nn.Conv2d(filters,out_chan, 1)
+        self.outconvT2 = nn.Conv2d(64,out_chan, 1)
+
+        self.atten_depth_channel_0=ChannelAttention(64)
+        self.atten_depth_channel_1=ChannelAttention(64)
+        self.atten_depth_channel_2=ChannelAttention(64)
+        self.atten_depth_channel_3=ChannelAttention(64)
+
+        self.atten_depth_channel_U_0=ChannelAttention(64)
+        self.atten_depth_channel_U_1=ChannelAttention(64)
+        self.atten_depth_channel_U_2=ChannelAttention(64)
+        self.atten_depth_channel_U_3=ChannelAttention(64)
+
+        self.atten_depth_spatial_0=SpatialAttention()
+        self.atten_depth_spatial_1=SpatialAttention()
+        self.atten_depth_spatial_2=SpatialAttention()
+        self.atten_depth_spatial_3=SpatialAttention()
+
+        self.atten_depth_spatial_U_0=SpatialAttention()
+        self.atten_depth_spatial_U_1=SpatialAttention()
+        self.atten_depth_spatial_U_2=SpatialAttention()
+        self.atten_depth_spatial_U_3=SpatialAttention()
+
+
+
+        
+        
+    def forward(self,T1, T2):
+
+        T1_x1 = self.conv1T1(T1)
+        T2 = torch.cat((T2,T1),dim=1)
+        T2_x1 = self.conv1T2(T2)
+
+
+        T1_x2,T1_y1 = self.downT1_1(self.dT1_1(T1_x1))
+        T2_x2,T2_y1 = self.downT2_1(self.dT2_1(T2_x1))
+        temp = T1_x2.mul(self.atten_depth_channel_0(T1_x2))
+        temp = temp.mul(self.atten_depth_spatial_0(temp))
+        T12_x2 = T2_x2.mul(temp)+T2_x2
+
+
+        T1_x3,T1_y2 = self.downT1_1(self.dT1_2(T1_x2))
+        T2_x3,T2_y2 = self.downT2_1(self.dT2_2(T12_x2))
+        temp = T1_x3.mul(self.atten_depth_channel_1(T1_x3))
+        temp = temp.mul(self.atten_depth_spatial_1(temp))
+        T12_x3 = T2_x3.mul(temp)+T2_x3
+
+
+
+        T1_x4,T1_y3 = self.downT1_1(self.dT1_3(T1_x3))
+        T2_x4,T2_y3 = self.downT2_1(self.dT2_3(T12_x3))
+        temp = T1_x4.mul(self.atten_depth_channel_2(T1_x4))
+        temp = temp.mul(self.atten_depth_spatial_2(temp))
+        T12_x4 = T2_x4.mul(temp)+T2_x4        
+
+
+
+
+        T1_x5,T1_y4 = self.downT1_1(self.dT1_4(T1_x4))
+        T2_x5,T2_y4 = self.downT2_1(self.dT2_4(T12_x4))
+        temp = T1_x5.mul(self.atten_depth_channel_3(T1_x5))
+        temp = temp.mul(self.atten_depth_spatial_3(temp))
+        T12_x5 = T2_x5.mul(temp)+T2_x5   
+
+
+        T1_x = self.bottom_T1(T1_x5)
+        T2_x = self.bottom_T2(T12_x5)
+
+
+        T1_1x = self.u4_T1(self.up4_T1(T1_x))
+        T2_1x = self.u4_T2(self.up4_T2(T2_x,T2_y4))
+        temp = T1_1x.mul(self.atten_depth_channel_U_0(T1_1x))
+        temp = temp.mul(self.atten_depth_spatial_U_0(temp))
+        T12_x = T2_1x.mul(temp)+T2_1x   
+
+
+
+        T1_2x = self.u3_T1(self.up3_T1(T1_1x))
+        T2_2x = self.u3_T2(self.up3_T2(T12_x,T2_y3))
+        temp = T1_2x.mul(self.atten_depth_channel_U_1(T1_2x))
+        temp = temp.mul(self.atten_depth_spatial_U_1(temp))
+        T12_x = T2_2x.mul(temp)+T2_2x   
+
+        T1_3x = self.u2_T1(self.up2_T1(T1_2x))
+        T2_3x = self.u2_T2(self.up2_T2(T12_x,T2_y2))
+        temp = T1_3x.mul(self.atten_depth_channel_U_2(T1_3x))
+        temp = temp.mul(self.atten_depth_spatial_U_2(temp))
+        T12_x = T2_3x.mul(temp)+T2_3x    
+
+        T1_4x = self.u1_T1(self.up1_T1(T1_3x))
+        T2_4x = self.u1_T2(self.up1_T2(T12_x,T2_y1))
+        temp = T1_4x.mul(self.atten_depth_channel_U_3(T1_4x))
+        temp = temp.mul(self.atten_depth_spatial_U_3(temp))
+        T12_x = T2_4x.mul(temp)+T2_4x   
+
+        T1 = self.outconvT1(T1_4x)
+        T2 = self.outconvT2(T12_x)
+        
+        return T1,T2
+
+
+class Dense_Unet_img(nn.Module):
+    def __init__(self, in_chan, out_chan, filters, num_conv = 4):  
+        super(Dense_Unet_img, self).__init__()
+        self.conv1T1 = nn.Conv2d(in_chan,filters,1)
+        self.conv1T2 = nn.Conv2d(2,filters,1)
+
+        self.dT1_1 = Single_level_densenet_img(filters,num_conv )
+        self.downT1_1 = Down_sample_img()
+        self.dT1_2 = Single_level_densenet_img(filters,num_conv )
+        self.downT1_2 = Down_sample_img()
+        self.dT1_3 = Single_level_densenet_img(filters,num_conv )
+        self.downT1_3 = Down_sample_img()
+        self.dT1_4 = Single_level_densenet_img(filters,num_conv )
+        self.downT1_4 = Down_sample_img()
+
+        self.dT2_1 = Single_level_densenet_img(filters,num_conv )
+        self.downT2_1 = Down_sample_img()
+        self.dT2_2 = Single_level_densenet_img(filters,num_conv )
+        self.downT2_2 = Down_sample_img()
+        self.dT2_3 = Single_level_densenet_img(filters,num_conv )
+        self.downT2_3 = Down_sample_img()
+        self.dT2_4 = Single_level_densenet_img(filters,num_conv )
+        self.downT2_4 = Down_sample_img()
+
+        self.bottom_T1 = Single_level_densenet_img(filters,num_conv )
+        self.bottom_T2 = Single_level_densenet_img(filters,num_conv )
+
+        self.up4_T1 = Upsample_n_Concat_T1_img(filters)
+        self.u4_T1 = Single_level_densenet_img(filters,num_conv )
+        self.up3_T1 = Upsample_n_Concat_T1_img(filters)
+        self.u3_T1 = Single_level_densenet_img(filters,num_conv )
+        self.up2_T1 = Upsample_n_Concat_T1_img(filters)
+        self.u2_T1 = Single_level_densenet_img(filters,num_conv )
+        self.up1_T1 = Upsample_n_Concat_T1_img(filters)
+        self.u1_T1 = Single_level_densenet_img(filters,num_conv )
+
+        self.up4_T2 = Upsample_n_Concat_1_img(filters)
+        self.u4_T2 = Single_level_densenet_img(filters,num_conv )
+        self.up3_T2 = Upsample_n_Concat_2_img(filters)
+        self.u3_T2 = Single_level_densenet_img(filters,num_conv )
+        self.up2_T2 = Upsample_n_Concat_3_img(filters)
+        self.u2_T2 = Single_level_densenet_img(filters,num_conv )
+        self.up1_T2 = Upsample_n_Concat_4_img(filters)
+        self.u1_T2 = Single_level_densenet_img(filters,num_conv )
+
+        self.outconvT1 = nn.Conv2d(filters,out_chan, 1)
+        self.outconvT2 = nn.Conv2d(64,out_chan, 1)
+        #Components of DEM module
+        self.atten_depth_channel_0=ChannelAttention_img(64)
+        self.atten_depth_channel_1=ChannelAttention_img(64)
+        self.atten_depth_channel_2=ChannelAttention_img(64)
+        self.atten_depth_channel_3=ChannelAttention_img(64)
+
+        self.atten_depth_channel_U_0=ChannelAttention_img(64)
+        self.atten_depth_channel_U_1=ChannelAttention_img(64)
+        self.atten_depth_channel_U_2=ChannelAttention_img(64)
+        self.atten_depth_channel_U_3=ChannelAttention_img(64)
+
+        self.atten_depth_spatial_0=SpatialAttention_img()
+        self.atten_depth_spatial_1=SpatialAttention_img()
+        self.atten_depth_spatial_2=SpatialAttention_img()
+        self.atten_depth_spatial_3=SpatialAttention_img()
+
+        self.atten_depth_spatial_U_0=SpatialAttention_img()
+        self.atten_depth_spatial_U_1=SpatialAttention_img()
+        self.atten_depth_spatial_U_2=SpatialAttention_img()
+        self.atten_depth_spatial_U_3=SpatialAttention_img()
+
+
+
+        
+        
+    def forward(self,T1, T2):
+
+        T1_x1 = self.conv1T1(T1)
+        T2 = torch.cat((T2,T1),dim=1)
+        T2_x1 = self.conv1T2(T2)
+
+        T1_x2,T1_y1 = self.downT1_1(self.dT1_1(T1_x1))
+        T2_x2,T2_y1 = self.downT2_1(self.dT2_1(T2_x1))
+        temp = T1_x2.mul(self.atten_depth_channel_0(T1_x2))
+        temp = temp.mul(self.atten_depth_spatial_0(temp))
+        T12_x2 = T2_x2.mul(temp)+T2_x2
+
+
+        T1_x3,T1_y2 = self.downT1_1(self.dT1_2(T1_x2))
+        T2_x3,T2_y2 = self.downT2_1(self.dT2_2(T12_x2))
+        temp = T1_x3.mul(self.atten_depth_channel_1(T1_x3))
+        temp = temp.mul(self.atten_depth_spatial_1(temp))
+        T12_x3 = T2_x3.mul(temp)+T2_x3
+
+        T1_x4,T1_y3 = self.downT1_1(self.dT1_3(T1_x3))
+        T2_x4,T2_y3 = self.downT2_1(self.dT2_3(T12_x3))
+        temp = T1_x4.mul(self.atten_depth_channel_2(T1_x4))
+        temp = temp.mul(self.atten_depth_spatial_2(temp))
+        T12_x4 = T2_x4.mul(temp)+T2_x4        
+
+
+        T1_x5,T1_y4 = self.downT1_1(self.dT1_4(T1_x4))
+        T2_x5,T2_y4 = self.downT2_1(self.dT2_4(T12_x4))
+        temp = T1_x5.mul(self.atten_depth_channel_3(T1_x5))
+        temp = temp.mul(self.atten_depth_spatial_3(temp))
+        T12_x5 = T2_x5.mul(temp)+T2_x5 
+
+
+        T1_x = self.bottom_T1(T1_x5)
+        T2_x = self.bottom_T2(T12_x5)
+
+
+        T1_1x = self.u4_T1(self.up4_T1(T1_x))
+        T2_1x = self.u4_T2(self.up4_T2(T2_x,T2_y4))
+        temp = T1_1x.mul(self.atten_depth_channel_U_0(T1_1x))
+        temp = temp.mul(self.atten_depth_spatial_U_0(temp))
+        T12_x = T2_1x.mul(temp)+T2_1x
+
+        T1_2x = self.u3_T1(self.up3_T1(T1_1x))
+        T2_2x = self.u3_T2(self.up3_T2(T12_x,T2_y3))
+        temp = T1_2x.mul(self.atten_depth_channel_U_1(T1_2x))
+        temp = temp.mul(self.atten_depth_spatial_U_1(temp))
+        T12_x = T2_2x.mul(temp)+T2_2x  
+
+
+        T1_3x = self.u2_T1(self.up2_T1(T1_2x))
+        T2_3x = self.u2_T2(self.up2_T2(T12_x,T2_y2))
+        temp = T1_3x.mul(self.atten_depth_channel_U_2(T1_3x))
+        temp = temp.mul(self.atten_depth_spatial_U_2(temp))
+        T12_x = T2_3x.mul(temp)+T2_3x  
+
+        T1_4x = self.u1_T1(self.up1_T1(T1_3x))
+        T2_4x = self.u1_T2(self.up1_T2(T12_x,T2_y1))
+        temp = T1_4x.mul(self.atten_depth_channel_U_3(T1_4x))
+        temp = temp.mul(self.atten_depth_spatial_U_3(temp))
+        T12_x = T2_4x.mul(temp)+T2_4x  
+
+        T1 = self.outconvT1(T1_4x)
+        T2 = self.outconvT2(T12_x)
+        
+        return T1,T2
+
+class Single_level_densenet_img(nn.Module):
+    def __init__(self,filters, num_conv = 4):
+        super(Single_level_densenet_img, self).__init__()
+        self.num_conv = num_conv
+        self.conv_list = nn.ModuleList()
+        self.bn_list = nn.ModuleList()
+        for i in range(self.num_conv):
+            self.conv_list.append(nn.Conv2d(filters,filters,3, padding = 1))
+            self.bn_list.append(nn.BatchNorm2d(filters))
+            
     def forward(self,x):
-        """
-            inputs :
-                x : input feature maps( B X N X C X H X W)
-            returns :
-                out : attention value + input feature
-                attention: B X N X N
-        """
-        m_batchsize, C, height, width = x.size()
-        out = x.unsqueeze(1)
-        out = self.sigmoid(self.conv(out))
+        outs = []
+        outs.append(x)
+        for i in range(self.num_conv):
+            temp_out = self.conv_list[i](outs[i])
+            if i > 0:
+                for j in range(i):
+                    temp_out += outs[j]
+            outs.append(F.relu(self.bn_list[i](temp_out)))
+        out_final = outs[-1]
+        del outs
+        return out_final
+    
+class Down_sample_img(nn.Module):
+    def __init__(self,kernel_size = 2, stride = 2):
+        super(Down_sample_img, self).__init__()
+        self.down_sample_layer = nn.MaxPool2d(kernel_size, stride)
+    
+    def forward(self,x):
+        y = self.down_sample_layer(x)
+        return y,x
 
-        out = self.gamma*out
-        out = out.view(m_batchsize, -1, height, width)
-        x = x * out + x
+class Upsample_n_Concat_1_img(nn.Module):
+    def __init__(self,filters):
+        super(Upsample_n_Concat_1_img, self).__init__()
+        self.upsample_layer = nn.ConvTranspose2d(filters, filters, 4, padding = 1, stride = 2)
+        self.conv = nn.Conv2d(filters*2,filters,3, padding = 1)
+        self.bn = nn.BatchNorm2d(filters)
+    
+    def forward(self,x,y):
+        x = self.upsample_layer(x)
+        x = torch.cat([x,y],dim = 1)
+        x = F.relu(self.bn(self.conv(x)))
         return x
 
-class RCAB(nn.Module):
-    def __init__(
-        self, conv, n_feat, kernel_size, reduction,
-        bias=True, bn=False, act=nn.ReLU(True), res_scale=1):
-
-        super(RCAB, self).__init__()
-        modules_body = []
-        for i in range(2):
-            modules_body.append(conv(n_feat, n_feat, kernel_size, bias=bias))
-            if bn: modules_body.append(nn.BatchNorm2d(n_feat))
-            if i == 0: modules_body.append(act)
-        modules_body.append(CALayer(n_feat, reduction))
-        self.body = nn.Sequential(*modules_body)
-        self.res_scale = res_scale
-
-    def forward(self, x):
-        res = self.body(x)
-        #res = self.body(x).mul(self.res_scale)
-        res += x
-        return res
-
-## Residual Group (RG)
-class ResidualGroup(nn.Module):
-    def __init__(self, conv, n_feat, kernel_size, reduction, act, res_scale, n_resblocks):
-        super(ResidualGroup, self).__init__()
-        modules_body = []
-        modules_body = [
-            RCAB(
-                conv, n_feat, kernel_size, reduction, bias=True, bn=False, act=nn.ReLU(True), res_scale=1) \
-            for _ in range(n_resblocks)]
-        modules_body.append(conv(n_feat, n_feat, kernel_size))
-        self.body = nn.Sequential(*modules_body)
-
-    def forward(self, x):
-        res = self.body(x)
-        res += x
-        return res
-
-
-class SR_Branch(nn.Module):
-    def __init__(self,scale,n_resgroups,n_resblocks,n_feats,conv=common.default_conv):
-        super(SR_Branch, self).__init__()
-        self.scale = scale
-        self.n_resgroups =  n_resgroups   #10
-        self.n_resblocks = n_resblocks   #20
-        self.n_feats =  n_feats    #64
-        kernel_size = 3
-        reduction = 16  #16
-        # scale = args.scale[0]
-        
-        rgb_range = 255
-        n_colors = 1
-        res_scale =0.1
-        act = nn.ReLU(True)
-        
-        
-        # define head module
-        modules_head = [conv(n_colors, n_feats, kernel_size)]
-
-        # define body module
-        modules_body = [
-            ResidualGroup(
-                conv, n_feats, kernel_size, reduction, act=act, res_scale=res_scale, n_resblocks=n_resblocks) \
-            for _ in range(n_resgroups)]
-
-        modules_body.append(conv(n_feats, n_feats, kernel_size))
-
-        # define tail module
-        modules_tail = [
-            common.Upsampler(conv, scale, n_feats, act=False),
-            conv(n_feats,n_feats, kernel_size)]#n_colors
-
-        self.add_mean = common.MeanShift(rgb_range, rgb_mean, rgb_std, 1)
-
-        self.head = nn.Sequential(*modules_head)
-        self.body = nn.Sequential(*modules_body)
-        self.csa = CSAM_Module(n_feats)
-        self.la = LAM_Module(n_feats)
-        self.last_conv = nn.Conv2d(n_feats*(n_resgroups+2), n_feats, 3, 1, 1)
-
-        self.last = nn.Conv2d(n_feats*2, n_feats, 3, 1, 1)
-        self.last1 = nn.Conv2d(n_feats, n_feats, 3, 1, 1)
-        self.tail = nn.Sequential(*modules_tail)
-        self.final = nn.Conv2d(n_feats, n_colors, 3, 1, 1)
-
-    def forward(self, x):
-        outputs = []
-        x = self.head(x)
-        outputs.append(x)
-
-        res = x
-
-        for name, midlayer in self.body._modules.items():
-            res = midlayer(res)  
-
-            if name=='0':
-                res1 = res.unsqueeze(1)
-            else:
-                res1 = torch.cat([res.unsqueeze(1),res1],1)
-            
-            outputs.append(res1)
-
-        out1 = res  
-        res = self.la(res1)
-        out2 = self.last_conv(res)   
-        out1 = self.csa(out1)   
-        out = torch.cat([out1, out2], 1)  
-        res = self.last(out)  
-        
-        res += x
-
-        outputs.append(res)
-
-        x = self.tail(res)
-
-        return outputs, x 
-
-    def load_state_dict(self, state_dict, strict=False):
-        own_state = self.state_dict()
-        for name, param in state_dict.items():
-            if name in own_state:
-                if isinstance(param, nn.Parameter):
-                    param = param.data
-                try:
-                    own_state[name].copy_(param)
-                except Exception:
-                    if name.find('tail') >= 0:
-                        print('Replace pre-trained upsampler to new one...')
-                    else:
-                        raise RuntimeError('While copying the parameter named {}, '
-                                           'whose dimensions in the model are {} and '
-                                           'whose dimensions in the checkpoint are {}.'
-                                           .format(name, own_state[name].size(), param.size()))
-            elif strict:
-                if name.find('tail') == -1:
-                    raise KeyError('unexpected key "{}" in state_dict'
-                                   .format(name))
-
-        if strict:
-            missing = set(own_state.keys()) - set(state_dict.keys())
-            if len(missing) > 0:
-                raise KeyError('missing keys in state_dict: "{}"'.format(missing))
-class Pred_Layer(nn.Module):
-    def __init__(self, in_c=32):
-        super(Pred_Layer, self).__init__()
-        self.enlayer = nn.Sequential(
-            nn.Conv2d(in_c, 32, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-        )
-        self.outlayer = nn.Sequential(
-            nn.Conv2d(32, 64, kernel_size=1, stride=1, padding=0), )
-
-    def forward(self, x):
-        x = self.enlayer(x)
-        x = self.outlayer(x)
+class Upsample_n_Concat_2_img(nn.Module):
+    def __init__(self,filters):
+        super(Upsample_n_Concat_2_img, self).__init__()
+        self.upsample_layer = nn.ConvTranspose2d(64, filters, 4, padding = 1, stride = 2)
+        self.conv = nn.Conv2d(128,filters,3, padding = 1)
+        self.bn = nn.BatchNorm2d(filters)
+    
+    def forward(self,x,y):
+        x = self.upsample_layer(x)
+        x = torch.cat([x,y],dim = 1)
+        x = F.relu(self.bn(self.conv(x)))
         return x
 
-class Seatt(nn.Module):
-    def __init__(self, in_c):
-        super(Seatt, self).__init__()
-        self.reduce = nn.Conv2d(in_c * 2, 32, 1)
-        self.ff_conv = nn.Sequential(
-            nn.Conv2d(32, 32, 3, 1, 1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-        )
-        self.bf_conv = nn.Sequential(
-            nn.Conv2d(32, 32, 3, 1, 1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-        )
-        self.rgbd_pred_layer = Pred_Layer(32 * 2)
-        self.convq = nn.Conv2d(32, 32, 3, 1, 1)
+class Upsample_n_Concat_3_img(nn.Module):
+    def __init__(self,filters):
+        super(Upsample_n_Concat_3_img, self).__init__()
+        self.upsample_layer = nn.ConvTranspose2d(64, filters, 4, padding = 1, stride = 2)
+        self.conv = nn.Conv2d(128,filters,3, padding = 1)
+        self.bn = nn.BatchNorm2d(filters)
+    
+    def forward(self,x,y):
+        x = self.upsample_layer(x)
+        x = torch.cat([x,y],dim = 1)
+        x = F.relu(self.bn(self.conv(x)))
+        return x
 
-    def forward(self, rgb_feat, dep_feat, pred):
-        feat = torch.cat((rgb_feat, dep_feat), 1)
+class Upsample_n_Concat_4_img(nn.Module):
+    def __init__(self,filters):
+        super(Upsample_n_Concat_4_img, self).__init__()
+        self.upsample_layer = nn.ConvTranspose2d(64, filters, 4, padding = 1, stride = 2)
+        self.conv = nn.Conv2d(128,filters,3, padding = 1)
+        self.bn = nn.BatchNorm2d(filters)
+    
+    def forward(self,x,y):
+        x = self.upsample_layer(x)
+        x = torch.cat([x,y],dim = 1)
+        x = F.relu(self.bn(self.conv(x)))
+        return x
 
-        vis_attention_map_rgb_feat(rgb_feat[0][0])
-        vis_attention_map_dep_feat(dep_feat[0][0])
-        vis_attention_map_feat(feat[0][0])
-
-
-        feat = self.reduce(feat)
-        [_, _, H, W] = feat.size()
-        pred = torch.sigmoid(pred)
-
-        ni_pred = 1 - pred
-
-        ff_feat = self.ff_conv(feat * pred)
-        bf_feat = self.bf_conv(feat * (1 - pred))
-        new_pred = self.rgbd_pred_layer(torch.cat((ff_feat, bf_feat), 1))
-
-        return new_pred
-
-class SANet(nn.Module):
-    def __init__(self, scale,n_resgroups,n_resblocks, n_feats):
-        super(SANet, self).__init__()
-        self.scale = scale
-        self.n_resgroups = n_resgroups
-        self.n_resblocks = n_resblocks
-        self.n_feats = n_feats
-
-        cs = [64,64,64,64]
-        self.Seatts = nn.ModuleList([Seatt(c) for c in cs])
-
-        self.net1 = SR_Branch(
-            scale = self.scale,
-            n_resgroups = self.n_resgroups,    
-            n_resblocks = self.n_resblocks,    
-            n_feats = self.n_feats,      
-        )
-
-        self.net2 = SR_Branch(
-            scale = self.scale,
-            n_resgroups = self.n_resgroups,    
-            n_resblocks = self.n_resblocks,    
-            n_feats = self.n_feats,       
-        )
-
-        main_net = SR_Branch(
-            scale = self.scale,
-            n_resgroups = self.n_resgroups,   
-            n_resblocks = self.n_resblocks,    
-            n_feats = self.n_feats,      
-        )
-
-        self.body = main_net.body
-        self.csa = main_net.csa
-        self.la = main_net.la
-        self.last_conv = main_net.last_conv
-        self.last = main_net.last
-        self.last1 = main_net.last1
-        self.tail = main_net.tail
-        self.conv1 = nn.Conv2d(128, 64, kernel_size=3, padding=1)
-        nlayer = len(self.net1.body._modules.items())
-        print("nlayer:",nlayer)
-        self.fusion_convs = nn.ModuleList([nn.Conv2d(128, 64, kernel_size=3, padding=1) for i in range(nlayer)])
-        self.map_convs = nn.ModuleList([nn.Conv2d(64, 1, kernel_size=3, padding=1) for i in range(nlayer)])
-        self.rgbd_global = Pred_Layer(32 * 2)
-
-    def forward(self, x1, x2, target_HR_T2):
-        x1 = self.net1.head(x1)
-        x2 = self.net2.head(x2)
-
-        x2 = self.tail(x2)
-
-        resT1 = x1
-        resT2 = x2
-
-        t1s = []
-        t2s = []
-
-        for m1, m2, Seatt, map_conv in zip(self.net1.body._modules.items(), self.net2.body._modules.items(), self.Seatts, self.map_convs):
-            
-            name1, midlayer1 = m1
-            _, midlayer2 = m2
-
-            resT1 = midlayer1(resT1)   
-            resT2 = midlayer2(resT2)
-
-            t1s.append(resT1.unsqueeze(1))
-            t2s.append(resT2.unsqueeze(1))
-
-            pred = map_conv(resT1)
-            res = Seatt(resT1,resT2,pred)
-
-            resT2 = res+resT2
-
-
-        out1T1 = resT1   
-        out1T2 = resT2
-
-        ts = t1s + t2s
-        ts = torch.cat(ts,dim=1)
-        res1_T2 = self.net2.la(ts)
-        out2_T2 = self.net2.last_conv(res1_T2)
-
-        out1T1 = self.net1.csa(out1T1)   
-        out1T2 = self.net2.csa(out1T2)
-
-        outT2 = torch.cat([out1T2, out2_T2], 1)  
-        resT1 = self.net1.last1(out1T1)  
-        resT2 = self.net2.last(outT2)
+class Upsample_n_Concat_T1_img(nn.Module):
+    def __init__(self,filters):
+        super(Upsample_n_Concat_T1_img, self).__init__()
+        self.upsample_layer = nn.ConvTranspose2d(filters, filters, 4, padding = 1, stride = 2)
+        self.conv = nn.Conv2d(filters,filters,3, padding = 1)
+        self.bn = nn.BatchNorm2d(filters)
+    
+    def forward(self,x):
+        x = self.upsample_layer(x)
+        x = F.relu(self.bn(self.conv(x)))
+        return x
+class ChannelAttention_img(nn.Module):
+    def __init__(self, in_planes, ratio=16):
+        super(ChannelAttention_img, self).__init__()
         
-        resT1 += x1
-        resT2 += x2
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
 
-        x1 = self.net1.final(resT1)
-        x2 = self.net2.final(resT2)
+        self.fc1   = nn.Conv2d(in_planes, in_planes // 16, 1, bias=False)
+        self.relu1 = nn.ReLU()
+        self.fc2   = nn.Conv2d(in_planes // 16, in_planes, 1, bias=False)
 
-        return x1,x2
+        self.sigmoid = nn.Sigmoid()
+    def forward(self, x):
+        max_out = self.fc2(self.relu1(self.fc1(self.max_pool(x))))
+        out = max_out
+        return self.sigmoid(out)
+
+class SpatialAttention_img(nn.Module):
+    def __init__(self, kernel_size=7):
+        super(SpatialAttention_img, self).__init__()
+
+        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        padding = 3 if kernel_size == 7 else 1
+
+        self.conv1 = nn.Conv2d(1, 1, kernel_size, padding=padding, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        x=max_out
+        x = self.conv1(x)
+        return self.sigmoid(x)
