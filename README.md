@@ -17,13 +17,23 @@ cd experimental/SANet/
 sbatch job.sh
 ```
 
+Our code is based on the fastMRI, more details can be find at https://github.com/facebookresearch/fastMRI.
 Change other arguments that you can train your own model.
+
 
 Citation
 
-If you find MANet useful for your research, please consider citing the following papers:
+If you use our code in your project, please cite the arXiv papers:
 
 ```
+@inproceedings{zbontar2018fastMRI,
+    title={{fastMRI}: An Open Dataset and Benchmarks for Accelerated {MRI}},
+    author={Jure Zbontar and Florian Knoll and Anuroop Sriram and Tullie Murrell and Zhengnan Huang and Matthew J. Muckley and Aaron Defazio and Ruben Stern and Patricia Johnson and Mary Bruno and Marc Parente and Krzysztof J. Geras and Joe Katsnelson and Hersh Chandarana and Zizhao Zhang and Michal Drozdzal and Adriana Romero and Michael Rabbat and Pascal Vincent and Nafissa Yakubova and James Pinkerton and Duo Wang and Erich Owens and C. Lawrence Zitnick and Michael P. Recht and Daniel K. Sodickson and Yvonne W. Lui},
+    journal = {ArXiv e-prints},
+    archivePrefix = "arXiv",
+    eprint = {1811.08839},
+    year={2018}
+}
 @article{feng2021multi,
   title={Multi-modal Aggregation Network for Fast MR Imaging},
   author={Feng, Chun-Mei and Fu, Huazhu and Zhou, Tianfei and Xu, Yong and Shao, Ling and Zhang, David},
