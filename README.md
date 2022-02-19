@@ -1,5 +1,5 @@
-# MANet
-# Multi-modal Aggregation Network for Fast MR Imaging
+# MARIO
+# Deep multi-modal aggregation network for MR image reconstruction with auxiliary modality
 
 ## Dependencies
 * numpy==1.18.5
@@ -37,7 +37,7 @@ If you use our code in your project, please cite the arXiv papers:
     year={2018}
 }
 @article{feng2021multi,
-  title={Multi-modal Aggregation Network for Fast MR Imaging},
+  title={Deep multi-modal aggregation network for MR image reconstruction with auxiliary modality},
   author={Feng, Chun-Mei and Fu, Huazhu and Zhou, Tianfei and Xu, Yong and Shao, Ling and Zhang, David},
   journal={arXiv preprint arXiv:2110.08080},
   year={2021}
